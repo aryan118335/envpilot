@@ -410,5 +410,23 @@ describe("EnvPilot Automated Test Suite", () => {
         expect(err.stderr.toString()).toContain("Config file not found");
       }
     });
+
+    test("cli check resolves relative rootDir inside .envpilot.json properly", () => {
+      const cliPath = path.resolve(process.cwd(), "dist", "cli.js");
+      const configDir = path.join(baseDir, "cfg-resolve-test");
+      const subDir = path.join(configDir, "subproject");
+      fs.mkdirSync(subDir, { recursive: true });
+      fs.writeFileSync(path.join(subDir, "app.js"), `const x = process.env.SUB_CONFIG_VAR;`);
+      fs.writeFileSync(
+        path.join(configDir, ".envpilot.json"),
+        JSON.stringify({ rootDir: "./subproject", strict: false })
+      );
+
+      const out = execSync(`node "${cliPath}" check --config "${path.join(configDir, ".envpilot.json")}" --json`, {
+        encoding: "utf8",
+      });
+      const data = JSON.parse(out);
+      expect(data.used).toContain("SUB_CONFIG_VAR");
+    });
   });
 });

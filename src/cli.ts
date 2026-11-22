@@ -44,6 +44,11 @@ program
         }
         const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
         Object.assign(auditOpts, cfg);
+        // If config specifies rootDir relative to config file location, resolve it
+        if (cfg.rootDir) {
+          const cfgDir = path.dirname(cfgPath);
+          auditOpts.rootDir = path.resolve(cfgDir, cfg.rootDir);
+        }
       } catch (e: any) {
         console.error("Failed to read config file:", e instanceof Error ? e.message : String(e));
         process.exit(2);
