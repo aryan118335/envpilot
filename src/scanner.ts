@@ -33,16 +33,17 @@ export interface AuditReport {
   duplicates: Set<string>;
 }
 
-/** Read a .env‑style file and return a set of variable names */
-function readEnvFile(filePath: string): Set<string> {
-  const vars = new Set<string>();
+/** Read a .env‑style file and return declared keys and duplicate keys */
+function parseEnvFile(filePath: string): { declared: Set<string>; duplicates: Set<string> } {
+  const declared = new Set<string>();
+  const duplicates = new Set<string>();
   try {
     const raw = fs.readFileSync(filePath, { encoding: "utf8" });
     const parsed = dotenv.parse(raw);
     for (const key of Object.keys(parsed)) {
-      vars.add(key);
+      declared.add(key);
     }
-    // Detect duplicate keys (dotenv keeps last value)
+    // Detect duplicate keys (dotenv keeps the last value)
     const seen = new Set<string>();
     for (const line of raw.split(/\r?\n/)) {
       const trimmed = line.trim();
@@ -50,62 +51,101 @@ function readEnvFile(filePath: string): Set<string> {
       const eq = trimmed.indexOf("=");
       if (eq === -1) continue;
       const key = trimmed.slice(0, eq).trim();
-      if (seen.has(key)) vars.add(key);
+      if (seen.has(key)) duplicates.add(key);
       seen.add(key);
     }
   } catch {}
-  return vars;
+  return { declared, duplicates };
+}
+
+/** Helper to check if an expression is `process.env` */
+function isProcessEnv(node: ts.Node): boolean {
+  if (ts.isPropertyAccessExpression(node)) {
+    return (
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "process" &&
+      node.name.text === "env"
+    );
+  }
+  if (ts.isElementAccessExpression(node)) {
+    return (
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "process" &&
+      ts.isStringLiteral(node.argumentExpression) &&
+      node.argumentExpression.text === "env"
+    );
+  }
+  return false;
 }
 
 /** Walk a source file and collect process.env usages */
 function collectEnvUsages(sourceFile: ts.SourceFile, used: Set<string>) {
   function visit(node: ts.Node) {
-    // process.env.VAR (dot notation)
+    // 1. process.env.VAR (dot notation)
     if (ts.isPropertyAccessExpression(node)) {
-      const expr = node.expression;
-      if (
-        ts.isPropertyAccessExpression(expr) &&
-        ts.isIdentifier(expr.expression) &&
-        expr.expression.text === "process" &&
-        expr.name.text === "env"
-      ) {
+      if (isProcessEnv(node.expression)) {
         used.add(node.name.text);
       }
     }
-    // process.env["VAR"] (bracket notation)
+
+    // 2. process.env["VAR"] (bracket notation)
     if (ts.isElementAccessExpression(node)) {
-      const expr = node.expression;
-      if (
-        ts.isPropertyAccessExpression(expr) &&
-        ts.isIdentifier(expr.expression) &&
-        expr.expression.text === "process" &&
-        expr.name.text === "env"
-      ) {
+      if (isProcessEnv(node.expression)) {
         const arg = node.argumentExpression;
-        if (ts.isStringLiteral(arg)) {
+        if (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg)) {
           used.add(arg.text);
         }
       }
     }
-    // const { VAR } = process.env;
-    if (ts.isVariableDeclaration(node) && node.initializer && ts.isPropertyAccessExpression(node.initializer)) {
-      const init = node.initializer;
-      if (
-        ts.isIdentifier(init.expression) &&
-        init.expression.text === "process" &&
-        init.name.text === "env"
-      ) {
-        const name = node.name;
-        if (ts.isObjectBindingPattern(name)) {
-          for (const element of name.elements) {
-            const propName = element.name;
-            if (ts.isIdentifier(propName) || ts.isStringLiteral(propName)) {
-              used.add(propName.text);
+
+    // 3. Destructuring in variable declaration: const { A, B: renamed } = process.env;
+    if (
+      ts.isVariableDeclaration(node) &&
+      node.initializer &&
+      isProcessEnv(node.initializer)
+    ) {
+      if (ts.isObjectBindingPattern(node.name)) {
+        for (const element of node.name.elements) {
+          if (element.propertyName) {
+            // e.g. { A: myVar } -> propertyName is "A"
+            if (
+              ts.isIdentifier(element.propertyName) ||
+              ts.isStringLiteral(element.propertyName)
+            ) {
+              used.add(element.propertyName.text);
+            }
+          } else {
+            // e.g. { A } -> element.name is "A"
+            if (
+              ts.isIdentifier(element.name) ||
+              ts.isStringLiteral(element.name)
+            ) {
+              used.add(element.name.text);
             }
           }
         }
       }
     }
+
+    // 4. Destructuring in assignment expression: ({ A, B: renamed } = process.env);
+    if (
+      ts.isBinaryExpression(node) &&
+      node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isProcessEnv(node.right)
+    ) {
+      if (ts.isObjectLiteralExpression(node.left)) {
+        for (const prop of node.left.properties) {
+          if (ts.isShorthandPropertyAssignment(prop)) {
+            used.add(prop.name.text);
+          } else if (ts.isPropertyAssignment(prop)) {
+            if (ts.isIdentifier(prop.name) || ts.isStringLiteral(prop.name)) {
+              used.add(prop.name.text);
+            }
+          }
+        }
+      }
+    }
+
     ts.forEachChild(node, visit);
   }
   visit(sourceFile);
@@ -117,9 +157,21 @@ export async function auditProject(options: AuditOptions = {}): Promise<AuditRep
   if (!fs.existsSync(root)) {
     throw new Error(`Directory not found: ${root}`);
   }
-  const ignore = options.ignore ?? ["node_modules/**", "dist/**", "build/**", "coverage/**"];
+  const defaultIgnore = [
+    "**/node_modules/**",
+    "**/dist/**",
+    "**/build/**",
+    "**/coverage/**",
+    "**/.git/**"
+  ];
+  const ignore = options.ignore ? [...options.ignore] : defaultIgnore;
 
-  const files = await fg(["**/*.{js,jsx,ts,tsx}"], { cwd: root, absolute: true, ignore });
+  const files = await fg(["**/*.{js,jsx,ts,tsx,mjs,cjs}"], {
+    cwd: root,
+    absolute: true,
+    ignore,
+    dot: false
+  });
   const used = new Set<string>();
   for (const file of files) {
     try {
@@ -131,27 +183,12 @@ export async function auditProject(options: AuditOptions = {}): Promise<AuditRep
 
   const envPath = path.join(root, ".env");
   const examplePath = path.join(root, ".env.example");
-  const declared = new Set<string>([...readEnvFile(envPath), ...readEnvFile(examplePath)]);
 
-  // Duplicate detection (per file)
-  const duplicates = new Set<string>();
-  const dupHelper = (file: string) => {
-    try {
-      const raw = fs.readFileSync(file, { encoding: "utf8" });
-      const seen = new Set<string>();
-      for (const line of raw.split(/\r?\n/)) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith("#")) continue;
-        const eq = trimmed.indexOf("=");
-        if (eq === -1) continue;
-        const key = trimmed.slice(0, eq).trim();
-        if (seen.has(key)) duplicates.add(key);
-        seen.add(key);
-      }
-    } catch {}
-  };
-  dupHelper(envPath);
-  dupHelper(examplePath);
+  const envData = parseEnvFile(envPath);
+  const exampleData = parseEnvFile(examplePath);
+
+  const declared = new Set<string>([...envData.declared, ...exampleData.declared]);
+  const duplicates = new Set<string>([...envData.duplicates, ...exampleData.duplicates]);
 
   const missingInEnv = new Set<string>([...used].filter(v => !declared.has(v)));
   const unusedInEnv = new Set<string>([...declared].filter(v => !used.has(v)));

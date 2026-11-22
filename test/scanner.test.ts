@@ -336,4 +336,78 @@ describe("EnvPilot Automated Test Suite", () => {
       expect(content.rootDir).toBe(".");
     });
   });
+
+  // ─────────────────────────────────────────────────────────────
+  // 10. Code Quality & Security (Milestone 7 verification)
+  // ─────────────────────────────────────────────────────────────
+  describe("Security and Advanced Scanner Robustness", () => {
+    const testDir = path.join(baseDir, "advanced-syntax");
+
+    beforeAll(() => {
+      fs.mkdirSync(testDir, { recursive: true });
+      // .env with sensitive secrets and duplicate keys
+      fs.writeFileSync(
+        path.join(testDir, ".env"),
+        `SUPER_SECRET_TOKEN=my-super-secret-password-12345\nDATABASE_PASSWORD=production_root_pass\n`
+      );
+      // Syntax covering aliased destructuring, assignment destructuring, and malformed files
+      fs.writeFileSync(
+        path.join(testDir, "complex.mjs"),
+        `
+        // Aliased destructuring
+        const { API_KEY: myAlias, PORT = 3000 } = process.env;
+
+        // Destructuring assignment to existing variables
+        let USER, ROLE;
+        ({ USER, ROLE: myRole } = process.env);
+
+        // Process['env'] bracket variation
+        const db = process['env'].DB_NAME;
+        const host = process["env"]['HOST_NAME'];
+        `
+      );
+      // Malformed source file to verify scanner does not crash on syntax errors
+      fs.writeFileSync(
+        path.join(testDir, "malformed.ts"),
+        `function broken( { return ??? process.env.RECOVERED_FROM_MALFORMED;`
+      );
+    });
+
+    test("never exposes secret values in serialized reports or console output", async () => {
+      const report = await scanProject(testDir);
+      const jsonString = JSON.stringify(report);
+      expect(jsonString).not.toContain("my-super-secret-password-12345");
+      expect(jsonString).not.toContain("production_root_pass");
+      expect(report.unusedInEnv).toContain("SUPER_SECRET_TOKEN");
+      expect(report.unusedInEnv).toContain("DATABASE_PASSWORD");
+    });
+
+    test("handles complex destructuring, alias, and process['env'] syntax", async () => {
+      const report = await scanProject(testDir);
+      expect(report.used).toEqual(
+        expect.arrayContaining([
+          "API_KEY",
+          "PORT",
+          "USER",
+          "ROLE",
+          "DB_NAME",
+          "HOST_NAME",
+          "RECOVERED_FROM_MALFORMED",
+        ])
+      );
+    });
+
+    test("cli check handles missing config file gracefully with exit code 2", () => {
+      const cliPath = path.resolve(process.cwd(), "dist", "cli.js");
+      try {
+        execSync(`node "${cliPath}" check --config /nonexistent/config.json`, {
+          stdio: "pipe",
+        });
+        throw new Error("Should have thrown");
+      } catch (err: any) {
+        expect(err.status).toBe(2);
+        expect(err.stderr.toString()).toContain("Config file not found");
+      }
+    });
+  });
 });

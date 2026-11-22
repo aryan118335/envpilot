@@ -1,6 +1,6 @@
 // src/cli.ts
 import { Command } from "commander";
-import { auditProject, serializeReport } from "./scanner.js";
+import { auditProject, serializeReport, type AuditOptions } from "./scanner.js";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
@@ -30,17 +30,21 @@ program
   .option("-s, --strict", "Exit with code 1 if any issues are found")
   .option("-c, --config <path>", "Path to a JSON configuration file")
   .action(async (options) => {
-    const auditOpts: any = {
+    const auditOpts: AuditOptions = {
       rootDir: options.dir,
     };
 
     if (options.config) {
       try {
         const cfgPath = path.resolve(options.config);
+        if (!fs.existsSync(cfgPath)) {
+          console.error(`Error: Config file not found: ${cfgPath}`);
+          process.exit(2);
+        }
         const cfg = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
         Object.assign(auditOpts, cfg);
       } catch (e: any) {
-        console.error("Failed to read config file:", e.message);
+        console.error("Failed to read config file:", e instanceof Error ? e.message : String(e));
         process.exit(2);
       }
     }
