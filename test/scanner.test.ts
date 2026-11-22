@@ -334,6 +334,7 @@ describe("EnvPilot Automated Test Suite", () => {
       expect(fs.existsSync(cfgPath)).toBe(true);
       const content = JSON.parse(fs.readFileSync(cfgPath, "utf8"));
       expect(content.rootDir).toBe(".");
+      expect(content.ignore).toContain("**/node_modules/**");
     });
   });
 

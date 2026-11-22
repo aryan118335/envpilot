@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 // src/cli.ts
 import { Command } from "commander";
 import { auditProject, serializeReport, type AuditOptions } from "./scanner.js";
@@ -121,7 +122,13 @@ program
     }
     const starter = {
       rootDir: ".",
-      ignore: ["node_modules/**", "dist/**", "build/**", "coverage/**"],
+      ignore: [
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/build/**",
+        "**/coverage/**",
+        "**/.git/**"
+      ],
       strict: false,
     };
     fs.writeFileSync(cfgPath, JSON.stringify(starter, null, 2) + "\n", "utf8");
